@@ -5,14 +5,13 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from dotenv import load_dotenv
 
 from crewai import Agent, Task, Crew, Process, LLM
 from crewai.tools import tool
-from crewai_tools import ScrapeWebsiteTool	
+from crewai_tools import ScrapeWebsiteTool
+import os
 
 # ========== Configurações ==========
-load_dotenv()
 
 # Configurar logging
 logging.basicConfig(
@@ -22,23 +21,23 @@ logging.basicConfig(
 )
 
 # Override de variáveis de ambiente
-os.environ.pop("OPENAI_API_KEY", None)
+os.environ["OPENAI_API_KEY"] = "NA"
 os.environ["CREWAI_LLM_PROVIDER"] = "ollama"
 os.environ["CREWAI_EMBEDDINGS_PROVIDER"] = "ollama"
-os.environ["CREW_DISABLE_TELEMETRY"] = "1"
+os.environ["CREW_DISABLE_TELEMETRY"] = "True"
+os.environ["CREWAI_API_BASE"] = "http://localhost:11434"
+#os.environ["CREWAI_TELEMETRY"] = "False"
 
 # Inicialização do LLM
 llm = LLM(
-    model="ollama/mistral:7b",
-    base_url="http://localhost:11434",
-    stream=False,
-    api_key="",
-    timeout=240
+    model="ollama/mistral:latest",
+    api_base=os.getenv("CREWAI_API_BASE"),
+    stream=True,
+    timeout=120,
+    temperature=0.7,
+    max_tokens=1000
 )
 
-# Ajuste de parâmetros do LLM
-llm.max_completion_tokens = 1024
-llm.temperature = 0.7
 
 # ========== Funções auxiliares ==========
 def fetch_price_history(symbol: str, period: str) -> pd.DataFrame:
@@ -113,8 +112,40 @@ def view_acao(moeda: str, periodo: str) -> str:
         f"- Variação no período: {pct_change:.2f}%\n"
     )
 
+
+busca_noticia = ScrapeWebsiteTool(website_url="https://br.cointelegraph.com/tags/bitcoin")
+
 # ========== Configuração do Agente ==========
-busca_noticia = ScrapeWebsiteTool()
+especialista_noticia = Agent(
+    role="Especialista em buscar noticias sobre bitcoin",
+    goal="Analisar noticias que encontrar pela web sobre o bitcoin, seja ela positiva ou negativa perante sua analise. Isso ajudará na tomada de decisão",
+    backstory="""
+    Você parece que nasceu para isso, para buscar noticias sobre o bitcoin e saber como essa noticia vai influenciar na descida ou subida do mesmo.
+    """,
+    verbose=True,
+    memory=True,
+    allow_delegation=False,
+    tools=[busca_noticia],
+    llm=llm,
+    max_iter=2
+)
+
+procurando_noticias = Task(
+    description="""
+    Sua tarefa é realizar uma busca rápida sobre as notícias mais recentes relacionadas ao Bitcoin.
+
+    Etapas:
+    1. Acesse as páginas de busca do site fornecido.
+    2. Leia apenas os **2 primeiros artigos de cada site**.
+    Seja objetivo, profissional e evite termos vagos. Foque na clareza e relevância.
+    """,
+    expected_output=f"""
+    1. Lista das 3 notícias mais relevantes com resumo, classificação e link.
+    2. Análise final sobre o sentimento predominante e possíveis impactos.
+    3. Retorne o que foi achado por você para o próximo agente para auxiliar em sua analise. 
+    """,
+    agent=especialista_noticia
+)
 
 especialista_trading = Agent(
     role="Especialista em Análise de Criptomoedas",
@@ -128,15 +159,15 @@ especialista_trading = Agent(
     ),
     verbose=True,
     memory=True,
-    allow_delegation=True,
+    allow_delegation=False,
     llm=llm,
-    tools=[view_acao],
+    tools=[view_acao]
 )
 
 # ========== Tarefa ==========
 analise_trading = Task(
     description=(
-        "1. Use view_acao para BTC-USD 1y.\n"
+        "1. Use view_acao para ver a criptomoeda {moeda} no periodo de {periodo}.\n"
         "2. Recalcule MM50, MM200, RSI14, Bollinger.\n"
         "3. Gere gráfico de Close com MM50/MM200.\n"
         "4. Interprete tendências e sinais técnicos.\n"
@@ -149,45 +180,7 @@ analise_trading = Task(
         "4. Recomendação final"
     ),
     agent=especialista_trading,
-    output_file="analise_btc.txt",
-)
-
-especialista_noticia = Agent(
-    role="Especialista em buscar noticias sobre bitcoin",
-    goal="Analisar noticias que encontrar pela web sobre o bitcoin, seja ela positiva ou negativa perante sua analise. Isso ajudará na tomada de decisão",
-    backstory="""
-    Você parece que nasceu para isso, para buscar noticias sobre o bitcoin e saber como essa noticia vai influenciar na descida ou subida do mesmo.
-    """,
-    verbose=True,
-    memory=True,
-    allow_delegation=False,
-    tools=[busca_noticia],
-    llm=llm
-)
-
-procurando_noticias = Task(
-    description="""
-    Sua tarefa é realizar uma busca aprofundada sobre as notícias mais recentes relacionadas ao Bitcoin, utilizando a ferramenta de scraping disponível.
-
-    Etapas:
-
-    1. Pesquise em fontes confiáveis de notícias financeiras e tecnológicas (ex: CoinDesk, CoinTelegraph, Bloomberg Crypto, etc.) buscando as manchetes e conteúdos publicados nos últimos 7 dias.
-    2. Para cada notícia encontrada:
-    - Resuma em 2 a 3 frases o conteúdo principal.
-    - Classifique a notícia como **POSITIVA**, **NEGATIVA** ou **NEUTRA** em relação ao impacto no preço do Bitcoin.
-    - Justifique brevemente sua classificação, mencionando os pontos principais.
-    3. Ao final, elabore um relatório consolidado contendo:
-    - Lista das 5 notícias mais relevantes, com título, resumo, classificação e link da fonte.
-    - Uma breve análise final sobre o sentimento predominante (positivo, negativo ou neutro) e possíveis impactos futuros no mercado de Bitcoin.
-
-    Use linguagem objetiva, profissional e evite termos subjetivos ou sem embasamento. Foque na clareza, precisão e relevância das informações.
-    """,
-    expected_output=f"""
-    1. Lista das 5 notícias mais relevantes com resumo, classificação e link.
-    2. Análise final sobre o sentimento predominante e possíveis impactos.
-    3. Retorne o que foi achado por você para o {especialista_trading} para auxiliar em sua analise. 
-    """,
-    agent=especialista_noticia
+    output_file="analise_btc.txt"
 )
 
 especialista_decisao = Agent(
@@ -234,13 +227,20 @@ tomada_decisao = Task(
 
 # ========== Execução ==========
 def main():
+
+    import logging
+
     crew = Crew(
-        agents=[especialista_trading, especialista_noticia, especialista_decisao],
-        tasks=[analise_trading, procurando_noticias, tomada_decisao],
+        agents=[especialista_noticia, especialista_trading, especialista_decisao],
+        tasks=[procurando_noticias, analise_trading, tomada_decisao],
         verbose=True,
-        process=Process.sequential,
+        process=Process.sequential
     )
-    resultado = crew.kickoff()
+
+    logging.getLogger("crewai.llm").setLevel(logging.DEBUG)
+    logging.getLogger("crewai.crew").setLevel(logging.DEBUG)
+
+    resultado = crew.kickoff(inputs={"moeda": "BTC-USD", "periodo": "1y"})
     logging.info("=== ANÁLISE FINAL ===")
     print(resultado)
 
